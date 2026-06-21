@@ -1,5 +1,8 @@
 # ES.exe Installation Guide
 
+> **NOTE**: The Pre-Search Validation Workflow in SKILL.md automatically detects and handles es.exe
+> installation. Use this reference for manual installation or additional troubleshooting.
+
 ES (Everything Search) is the official command-line interface for Everything.
 
 ## What is ES.exe?
@@ -84,10 +87,12 @@ es *.mp3 -export-txt songs.txt
 
 - Make sure Everything is running
 - Check that the Everything service is running
+- Run the Pre-Search Validation Workflow in SKILL.md for automatic detection and repair
 
 ### No output
 
 - Verify Everything has finished indexing
+- For non-NTFS volumes, indexing may still be in progress (see SKILL.md for NTFS vs non-NTFS guidance)
 - Try a simple search first: `es *`
 
 ### Permission denied

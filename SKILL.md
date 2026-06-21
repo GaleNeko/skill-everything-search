@@ -1,11 +1,15 @@
 ---
 name: everything-search
-description: Fast file search on Windows using Everything search engine. Use when the user wants to find files on their computer, search by name/type/location, or locate recently modified files. Supports fuzzy matching - when the user's query is imprecise, gather all potential matches and present the most relevant results. Works with both es.exe CLI (recommended) and Everything.exe GUI.
+description: Fast file search on Windows using Everything search engine (es.exe CLI). Includes automatic pre-search validation, fuzzy matching. Requires es.exe for console output. Triggers on: 搜索文件、查找文件、全局搜索、帮我找、找到、找不到、搜一下、在哪里、全盘搜索。
 ---
 
 # Everything Search
 
 Fast local file search using the Everything search engine on Windows.
+
+> **IMPORTANT**: Before running ANY search, ALWAYS execute the Pre-Search Validation Workflow below.
+> Do not skip to search commands without completing validation.
+> This applies to the first search in a session AND any subsequent searches where the error recovery decision tree indicates a re-check is needed.
 
 ## Overview
 
@@ -17,54 +21,198 @@ This skill enables rapid file discovery across the entire computer using Everyth
 - Detailed output with file metadata
 - Fuzzy matching for imprecise queries
 
-## Prerequisites
+## Critical: es.exe is NOT included with Everything
 
-Everything must be installed and running. The skill works with:
-1. **es.exe** (recommended) - Command-line interface, outputs to console
-2. **Everything.exe** - Main application with limited CLI support
+es.exe (the command-line interface) is a **separate download** from Everything.exe (the GUI application).
+Installing Everything.exe alone does NOT provide `es` on the command line.
 
-### Finding Everything
+| Component | What it is | CLI Support |
+|-----------|-----------|-------------|
+| Everything.exe | GUI application (main program) | None (GUI only, cannot output to console) |
+| es.exe | Command-line interface | Full console output, sorting, export |
 
-Common installation paths:
-- `C:\Program Files\Everything\Everything.exe`
-- `C:\Program Files (x86)\Everything\Everything.exe`
-- Portable installations in user directories
+If the user only has Everything.exe installed, `es` commands will fail with "command not found".
+The Pre-Search Validation Workflow below handles this automatically.
 
-### Installing ES.exe (Optional but Recommended)
+## Pre-Search Validation Workflow
 
-ES.exe provides better CLI output. Download from: https://www.voidtools.com/downloads/
+Execute these steps IN ORDER before performing any search.
 
-## Quick Start
+### Step 1: Detect Everything Installation
 
-### Basic Search
-
-```powershell
-# Search for files containing "report"
-es report
-
-# Search for PDF files
-es *.pdf
-
-# Search in specific directory
-es -path "D:\Documents" *.docx
-```
-
-### Detailed Results
+Run these checks sequentially. Stop at the first that succeeds.
 
 ```powershell
-# Show path, size, and modification date
-es -size -date-modified *.zip
+# Check 1A: Registry (most reliable)
+$regPath = Get-ItemProperty -Path "HKLM:\SOFTWARE\VoidTools\Everything" -Name "InstallPath" -ErrorAction SilentlyContinue
+if (-not $regPath) {
+  # 32-bit Everything on 64-bit Windows
+  $regPath = Get-ItemProperty -Path "HKLM:\SOFTWARE\WOW6432Node\VoidTools\Everything" -Name "InstallPath" -ErrorAction SilentlyContinue
+}
+$everythingRoot = if ($regPath) { $regPath.InstallPath.TrimEnd('\') }
 
-# Sort by size (largest first)
-es -sort size *.iso
+# Check 1B: Common installation paths
+$commonPaths = @(
+    "$env:ProgramFiles\Everything\Everything.exe",
+    "${env:ProgramFiles(x86)}\Everything\Everything.exe",
+    "$env:LOCALAPPDATA\Everything\Everything.exe",
+    "$env:USERPROFILE\Everything\Everything.exe"
+)
+$existingExe = $commonPaths | Where-Object { Test-Path $_ } | Select-Object -First 1
+if ($existingExe -and -not $everythingRoot) {
+  $everythingRoot = Split-Path $existingExe -Parent
+}
 
-# Limit to top 10 results
-es -n 10 -sort date-modified
+# Check 1C: Service binary path
+if (-not $everythingRoot) {
+  $svc = Get-CimInstance Win32_Service -Filter "Name='Everything'" -ErrorAction SilentlyContinue
+  if ($svc -and $svc.PathName) {
+    $everythingRoot = Split-Path ($svc.PathName -replace '"','') -Parent
+  }
+}
+
+# Check 1D: where.exe
+if (-not $everythingRoot) {
+  $fromWhere = where.exe everything 2>$null | Select-Object -First 1
+  if ($fromWhere) { $everythingRoot = Split-Path $fromWhere -Parent }
+}
+
+if (-not $everythingRoot) {
+  Write-Warning "Everything is not installed or could not be detected."
+  Write-Output "Please download and install Everything from: https://www.voidtools.com/downloads/"
+  Write-Output "After installation, run this search again."
+  return
+}
+Write-Output "Everything installation found: $everythingRoot"
 ```
 
-## Search Capabilities
+### Step 2: Ensure Everything is Running
 
-### 1. Basic File Search
+```powershell
+$proc = Get-Process -Name "Everything" -ErrorAction SilentlyContinue
+if (-not $proc) {
+  $svc = Get-Service -Name "Everything" -ErrorAction SilentlyContinue
+  if ($svc -and $svc.Status -eq 'Running') {
+    Write-Output "Everything service is running"
+  } else {
+    Write-Output "Everything is not running. Attempting to start..."
+    $everythingExe = Join-Path $everythingRoot "Everything.exe"
+    if (Test-Path $everythingExe) {
+      Start-Process -FilePath $everythingExe
+      Start-Sleep -Seconds 3
+      $proc = Get-Process -Name "Everything" -ErrorAction SilentlyContinue
+      if ($proc) {
+        Write-Output "Everything started successfully (PID: $($proc.Id))"
+      } else {
+        Write-Warning "Failed to start Everything automatically."
+        Write-Output "Please start Everything manually and retry."
+        return
+      }
+    } else {
+      Write-Warning "Cannot find Everything.exe at $everythingExe"
+      Write-Output "Please start Everything manually and retry."
+      return
+    }
+  }
+} else {
+  Write-Output "Everything process is running (PID: $($proc.Id))"
+}
+```
+
+### Step 3: Check es.exe Availability
+
+```powershell
+# Check in PATH first
+$esPath = (Get-Command "es.exe" -ErrorAction SilentlyContinue).Source
+
+# Check alongside Everything.exe
+if (-not $esPath) {
+  $esInEverythingDir = Join-Path $everythingRoot "es.exe"
+  if (Test-Path $esInEverythingDir) { $esPath = $esInEverythingDir }
+}
+
+if (-not $esPath) {
+  Write-Warning "es.exe is not installed."
+  Write-Output "Attempting to download es.exe to Everything directory..."
+
+  $esDownloadUrl = "https://www.voidtools.com/es.exe"
+  $esTarget = Join-Path $everythingRoot "es.exe"
+
+  # Fallback to LOCALAPPDATA if Everything dir is not writable
+  if (-not (Test-Path $everythingRoot -Path Container -IsReadOnly -EA SilentlyContinue)) {
+    $altDir = "$env:LOCALAPPDATA\Everything"
+    if (-not (Test-Path $altDir)) { New-Item -ItemType Directory -Path $altDir -Force | Out-Null }
+    $esTarget = "$altDir\es.exe"
+  }
+
+  try {
+    Invoke-WebRequest -Uri $esDownloadUrl -OutFile $esTarget -TimeoutSec 15
+    if (Test-Path $esTarget) {
+      Write-Output "es.exe downloaded to: $esTarget"
+      $esPath = $esTarget
+    }
+  } catch {
+    Write-Warning "Failed to download es.exe: $_"
+  }
+}
+
+if ($esPath) {
+  Write-Output "es.exe is available at: $esPath"
+} else {
+  Write-Warning "es.exe is NOT available and auto-download failed. Search cannot proceed without es.exe."
+  Write-Output "To install manually: download from https://www.voidtools.com/es.exe"
+  Write-Output "and place it in $everythingRoot or a directory in your PATH."
+  return
+}
+```
+
+### Step 4: Execute Search
+
+Once validation passes, use `& "$esPath"` for all searches (full console output).
+If `$esPath` is not set at this point, search cannot proceed — report the error to the user.
+
+## How to Install es.exe
+
+es.exe is a single-file executable (~100KB). No installer needed.
+
+```powershell
+# Option 1: Download directly (admin not required if writing to %LOCALAPPDATA%)
+$target = "$env:LOCALAPPDATA\Everything"
+if (-not (Test-Path $target)) { New-Item -ItemType Directory -Path $target -Force | Out-Null }
+Invoke-WebRequest -Uri "https://www.voidtools.com/es.exe" -OutFile "$target\es.exe"
+
+# Add to PATH (optional)
+[Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path","User") + ";$target", "User")
+
+# Verify
+es -version
+```
+
+Expected output: `ES 1.1.0.23`
+
+## Post-Installation and Indexing Guidance
+
+Everything indexes files using one of two methods depending on your filesystem:
+
+### NTFS Drives (Recommended, Default for C:)
+- Uses the NTFS USN Journal (change journal)
+- Indexing is **instantaneous** — no initial scan needed
+- Updates are **real-time** — no rescan is ever needed
+
+### ReFS / FAT32 / exFAT / Network Drives
+- Everything must do a full folder scan
+- Initial indexing can take **minutes to hours** depending on size
+- Periodic rescans ARE required (configure in Everything: Tools > Options > Indexes)
+- es.exe may return "no results" if indexing is not yet complete
+
+### Checking Index Status
+es.exe has no built-in status command. To check:
+- Try a broad search: `es *` — empty results on a non-NTFS volume may mean indexing is still in progress
+- Open the Everything GUI and check the status bar (bottom-right): shows "Indexing X files..." or "Indexing complete"
+
+## Search Commands Reference
+
+### Basic File Search
 
 Search by filename or partial match:
 
@@ -77,9 +225,12 @@ es *budget*
 
 # File extension
 es *.mp4
+
+# Multiple extensions
+es *.mp4 *.avi *.mkv
 ```
 
-### 2. Path-Based Search
+### Path-Based Search
 
 Limit search to specific directories:
 
@@ -89,9 +240,12 @@ es -path "D:\Downloads" *.exe
 
 # Search parent directory
 es -parent "C:\Users\Admin" *.txt
+
+# Everything syntax
+path:Downloads *.pdf
 ```
 
-### 3. Sorting Results
+### Sorting Results
 
 ```powershell
 # Sort by name (default)
@@ -107,7 +261,7 @@ es -sort date-modified
 es -sort name -sort-ascending
 ```
 
-### 4. Detailed Output Columns
+### Detailed Output Columns
 
 ```powershell
 # Show all available columns
@@ -119,14 +273,14 @@ es -size -dc -dm *.log      # Size + Created + Modified
 ```
 
 Available columns:
-- `-size` or `-s` - File size
-- `-date-modified` or `-dm` - Last modified date
-- `-date-created` or `-dc` - Creation date
-- `-date-accessed` or `-da` - Last accessed date
-- `-extension` or `-ext` - File extension
-- `-attributes` or `-attrib` - File attributes
+- `-size` or `-s` — File size
+- `-date-modified` or `-dm` — Last modified date
+- `-date-created` or `-dc` — Creation date
+- `-date-accessed` or `-da` — Last accessed date
+- `-extension` or `-ext` — File extension
+- `-attributes` or `-attrib` — File attributes
 
-### 5. Limiting Results
+### Limiting Results
 
 ```powershell
 # Show only first 20 results
@@ -179,10 +333,10 @@ es -sort date-modified -n 20 *.mp4 *.avi *.mkv
 
 When multiple matches exist, present results intelligently:
 
-1. **Group by relevance** - Exact matches first, then partial
-2. **Group by location** - Group files by parent directory
-3. **Highlight metadata** - Show size and dates to help identify
-4. **Offer disambiguation** - Ask user to clarify if too many matches
+1. **Group by relevance** — Exact matches first, then partial
+2. **Group by location** — Group files by parent directory
+3. **Highlight metadata** — Show size and dates to help identify
+4. **Offer disambiguation** — Ask user to clarify if too many matches
 
 ## Common Search Patterns
 
@@ -226,20 +380,6 @@ es *.docx -export-txt documents.txt
 es *.mp3 -export-efu music.efu
 ```
 
-## Using Everything.exe (Fallback)
-
-If es.exe is not available, use Everything.exe with limited output:
-
-```powershell
-# Open Everything with search term
-& "C:\Program Files\Everything\Everything.exe" -s "*.pdf"
-
-# Search with path filter
-& "C:\Program Files\Everything\Everything.exe" -s "path:D:\Downloads *.zip"
-```
-
-Note: Everything.exe opens the GUI window; results are not returned to console.
-
 ## Search Syntax Reference
 
 Everything supports powerful search syntax:
@@ -248,9 +388,9 @@ Everything supports powerful search syntax:
 |--------|-------------|---------|
 | `*` | Wildcard (any characters) | `*.txt` |
 | `?` | Single character wildcard | `file?.docx` |
-| `|` | OR operator | `.jpg | .png` |
+| `\|` | OR operator | `.jpg \| .png` |
 | `!` | NOT operator | `!*.tmp` |
-| `< >` | Grouping | `<*.jpg | *.png>` |
+| `< >` | Grouping | `<*.jpg \| *.png>` |
 | `""` | Exact phrase | `"annual report"` |
 | `path:` | Search in path | `path:Downloads` |
 | `size:` | Filter by size | `size:>1gb` |
@@ -258,25 +398,52 @@ Everything supports powerful search syntax:
 
 See `references/search-syntax.md` for complete syntax guide.
 
-## Error Handling
+## Error Recovery Decision Tree
 
-Common issues and solutions:
+When a search fails, follow this decision tree:
 
-| Error | Cause | Solution |
-|-------|-------|----------|
-| "Everything IPC window not found" | Everything not running | Start Everything application |
-| No results | Index not complete | Wait for Everything to finish indexing |
-| Permission denied | Protected folders | Run as administrator if needed |
+### "es.exe" / "es" command not found
+- **Cause**: es.exe is not installed or not in PATH
+- **Check**: Run Pre-Search Validation Step 3
+- **Fix**: Auto-download by running Step 3, or manually download from https://www.voidtools.com/es.exe
+
+### "Everything IPC window not found"
+- **Cause**: Everything is not running, or es.exe cannot communicate with Everything
+- **Check**: `Get-Process Everything -ErrorAction SilentlyContinue`
+- **Check**: `Get-Service Everything -ErrorAction SilentlyContinue`
+- **Fix**: Run Pre-Search Validation Step 2 to start Everything automatically
+
+### es.exe returns empty / "no files found"
+- **Cause A**: No files match the query (legitimate)
+- **Cause B**: Indexing not yet complete (non-NTFS volumes)
+- **Cause C**: Everything is running but not indexing the target volume
+- **Check A**: Try a broad search: `es *`
+- **Check B**: If on non-NTFS, check indexing status in Everything GUI
+- **Check C**: Confirm target drive is indexed: Everything > Tools > Options > Indexes
+
+### Everything is installed but won't start
+- **Cause A**: Everything service is disabled
+- **Cause B**: Corrupted configuration
+- **Fix A**: `Set-Service -Name Everything -StartupType Automatic; Start-Service Everything`
+- **Fix B**: Delete or rename `%APPDATA%\Everything\Everything.ini` and restart
+
+### "Permission denied" / Access denied
+- **Cause**: Protected system folders
+- **Fix**: Run PowerShell as Administrator and retry
 
 ## Best Practices
 
-1. **Use es.exe when possible** - Better console output and scripting support
-2. **Limit results** - Use `-n` to avoid overwhelming output
-3. **Sort strategically** - Sort by size or date to find what matters
-4. **Combine filters** - Use path + extension for precise searches
-5. **Export for large sets** - Use `-export-*` options for processing results
+1. **es.exe is required** — Everything.exe GUI cannot output to console, so all searches must go through es.exe
+2. **Limit results** — Use `-n` to avoid overwhelming output
+3. **Sort strategically** — Sort by size or date to find what matters
+4. **Combine filters** — Use path + extension for precise searches
+5. **Export for large sets** — Use `-export-*` options for processing results
+6. **Always validate first** — Never skip the Pre-Search Validation Workflow
+7. **NTFS preferred** — For best performance, keep files on NTFS volumes
 
 ## Resources
 
-- `references/search-syntax.md` - Complete search syntax reference
-- `references/es-download.md` - ES.exe installation guide
+- `references/es-download.md` — ES.exe installation guide with full details
+- `references/search-syntax.md` — Complete Everything search syntax reference
+- Download Everything: https://www.voidtools.com/downloads/
+- Download es.exe: https://www.voidtools.com/es.exe
