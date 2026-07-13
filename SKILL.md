@@ -1,5 +1,5 @@
 ---
-name: skill-everything-search
+name: everything-search
 description: Fast file search on Windows using Everything search engine (es.exe CLI). Includes automatic pre-search validation, fuzzy matching. Requires es.exe for console output. Triggers on: 搜索文件、查找文件、全局搜索、帮我找、找到、找不到、搜一下、在哪里、全盘搜索。
 ---
 
